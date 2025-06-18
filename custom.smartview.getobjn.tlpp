@@ -1,1 +1,821 @@
 
+#include "totvs.ch"
+#INCLUDE "PROTHEUS.CH"
+#INCLUDE "FWMVCDEF.CH"
+#include "msobject.ch"
+#include 'tlpp-object.th'
+#include "totvs.framework.treports.integratedprovider.th"
+#include "tlpp-core.th"
+#include "tlpp-rest.th"
+#include "fw-tlpp-rest.th"
+#include "restful.ch"
+
+//using namespace totvs.framework.treports.integratedprovider
+namespace custom.smartview
+
+User Function GETOBJN()    
+    Local oBrowse as object
+    Private aRotina := {}  
+    Private cAliasON := GetNextAlias()  
+    Private oONTable
+    Private aDadosRotina := {}
+
+    aDadosRotina := U_PARAMER(1)
+
+    if aDadosRotina[1]
+
+        criaTabelaTemp()
+
+        if buscaObjetoNegocios()
+
+            DBSelectArea(cAliasON)
+            (cAliasON)->(DBGoTop())
+
+            oBrowse := FWLoadBrw("custom.smartview.GETOBJN")
+            oBrowse:Activate()
+            oBrowse:DeActivate()
+            oBrowse:Destroy()
+            FreeObj(oBrowse)
+            oBrowse := nil                
+        endif
+
+        oONTable:Delete()
+
+    endif    
+Return NIL
+
+Static Function criaTabelaTemp()
+    Local aFields := {}
+    
+    oONTable := FWTemporaryTable():New(cAliasON)
+    aadd(aFields,{"OBJNEG","C",200,0})
+    aadd(aFields,{"DESCRI","C",200,0})
+    aadd(aFields,{"NOME","C",200,0})
+    aadd(aFields,{"FONTE","C",200,0})
+    aadd(aFields,{"DADOS","M",1,1})
+    aadd(aFields,{"PERG","C",15,0})
+    aadd(aFields,{"PROPR","M",1,0})
+    aadd(aFields,{"PARAMS","M",1,0})
+    aadd(aFields,{"MODULO","C",20,0})
+    aadd(aFields,{"AREA","C",50,0})
+    oONTable:SetClobMemo(.T.)
+    oONTable:SetFields( aFields )
+    oONTable:AddIndex("1", {"OBJNEG"} )
+    oONTable:AddIndex("2", {"MODULO"} )
+    oONTable:AddIndex("3", {"PERG"} )
+    oONTable:AddIndex("4", {"AREA"} )
+    oONTable:Create()
+Return
+
+Static Function buscaObjetoNegocios()
+    Local  lProcessa := .F.
+    Processa({|| lProcessa := getObjetosNegocios()},,"Buscando os objetos de negocios. Aguarde...")
+    if !lProcessa
+        MsgAlert("Não foi localizado nenhum objeto de negócio. Verifique o parametro 'Filtro dos Objetos de Negócio'.", "Parâmetros")  
+    endif
+Return lProcessa
+
+Static Function getObjetosNegocios()
+    Local lRet := .T.
+    Local aObjetosNegocios, aMetodos As Array 
+    Local nI
+    Local oObjetoNegocio
+    Local jDados as Json
+    Local oSchema as Object
+    Local cDescricao := ""   
+    Local aListaAnotacao As Array
+    Local cModulo, cNome, cFonte := ""
+    Local cFiltroON := Alltrim(aDadosRotina[5])
+
+    if Empty(cFiltroON)
+        aObjetosNegocios := Reflection.getClassesByAnnotation("totvsFrameworkTReportsIntegratedProvider", "totvs*")
+    else       
+        aObjetosNegocios := Reflection.getClassesByAnnotation("totvsFrameworkTReportsIntegratedProvider", cFiltroON)
+    endif
+
+    if (ValType(aObjetosNegocios) == "U") .or. (ValType(aObjetosNegocios) <> "A" .or. Len(aObjetosNegocios) == 0)
+        Return .F.
+    endif
+
+    oONTable:Zap()
+    ProcRegua(Len(aObjetosNegocios))
+    for nI := 1 to Len(aObjetosNegocios)        
+        cObjetoNegocio := Alltrim(aObjetosNegocios[nI]:CCLASSNAME)
+        cFonte         := Alltrim(aObjetosNegocios[nI]:CPROGRAMNAME)
+        IncProc("Buscando dados dos Objetos de Negocio " +  cValToChar(nI) + " de " + cValToChar(Len(aObjetosNegocios)) + "...")
+        if sfValidaObjetoNegocio(cObjetoNegocio)
+            aMetodos := &(cObjetoNegocio + "():TGetMethods()")          
+            
+            if Ascan(aMetodos, {|x| Upper(x) == "NEW"} ) == 0
+                Loop
+            endif
+            
+            aListaAnotacao := Reflection.getClassAnnotationList(cObjetoNegocio)
+            lActive := .T. 
+            cModulo := "OUTROS"           
+            if (valType(aListaAnotacao) == "A") .and. (len(aListaAnotacao) > 0)
+                lActive := aListaAnotacao[1]["active"]
+                cModulo := Iif(Empty(aListaAnotacao[1]["team"]),"OUTROS",aListaAnotacao[1]["team"])
+                cNome   := Iif(Empty(aListaAnotacao[1]["name"]),"(Sem Nome)",aListaAnotacao[1]["name"])
+                if ! lActive
+                    Loop
+                endif
+            endif
+                                                    
+            if ! Ascan(aMetodos, {|x| Upper(x) == "GETSCHEMA"} ) > 0
+                Loop                
+            endif               
+
+            oObjetoNegocio := &(cObjetoNegocio + "():New()")
+            cDescricao := "(Sem Descricao)"
+            if Ascan(aMetodos, {|x| Upper(x) == "GETDESCRIPTION"} ) > 0
+                cDescricao := oObjetoNegocio:getDescription()
+            endif             
+            
+            oSchema := oObjetoNegocio:getSchema()
+
+            jDados := JsonObject():new()
+            jDados:FromJson('{' +;
+                            '"OBJETONEGOCIO":"' + Lower(cObjetoNegocio) + '",' +;
+                            '"SCHEMA":' + FWJsonSerialize(oSchema) + ;
+                            '}';
+            )     
+
+            lRet := .T.
+            RecLock(cAliasON, .T.)
+            (cAliasON)->OBJNEG := Lower(cObjetoNegocio)
+            (cAliasON)->DESCRI := Capital(cDescricao)
+            (cAliasON)->NOME   := Capital(cNome)
+            (cAliasON)->FONTE  := Upper(cFonte)
+            (cAliasON)->DADOS  := Alltrim(FWJsonSerialize(jDados)) 
+            (cAliasON)->PERG   := oObjetoNegocio:getPergunte()                    
+            (cAliasON)->PROPR  := Alltrim(FWJsonSerialize(oSchema:GetProperties()))
+            (cAliasON)->PARAMS := Alltrim(FWJsonSerialize(oSchema:GetParameters()))
+            (cAliasON)->MODULO := cModulo
+            (cAliasON)->(MsUnLock())
+           
+            FreeObj(oObjetoNegocio)
+            oObjetoNegocio := nil
+
+            oSchema:Destroy()
+            FreeObj(oSchema)
+            oSchema := nil
+           
+            FreeObj(jDados)
+            jDados := nil
+            
+        endif
+    next nI
+    (oONTable:GetAlias())->(DBGoTop())
+Return lRet
+
+Static Function sfValidaObjetoNegocio(cObjetoNegocio)
+    Local aON := {}
+    Local lRet := .T.
+     
+    Aadd(aON, "TOTVS.PROTHEUS.ESOCIAL.TAF.TREPORTSINTEGRATEDPROVIDER.ESOCIALCONFERENCESMARTVIEWBUSINESSOBJECT")
+    Aadd(aON, "TOTVS.PROTHEUS.ESOCIAL.TAF.TREPORTSINTEGRATEDPROVIDER.ESOCIALTRANSMITIONSMARTVIEWBUSINESSOBJECT")
+    Aadd(aON, "CUSTOM.FATURAMENTO.MOVSENTRADASALIDA.INTEGRATEDPROVIDER.MOVSENTRADASALIDATREPORTSBUSINESSOBJECT")
+    lRet := Ascan(aON, {|X| Upper(Alltrim(cObjetoNegocio)) == X}) == 0
+
+Return lRet
+
+User Function BrowseDef() as object
+    Local oBrowse as object
+    Local aBrowse as array
+    Local aPesquisa as array
+
+    DBSelectArea(cAliasON)
+
+    aBrowse := {}
+    aAdd(aBrowse, {"Modulo",        "MODULO", "C", 20, 0, ""})
+    aAdd(aBrowse, {"Obj Negocio",   "OBJNEG", "C", 200, 0, ""})
+    aAdd(aBrowse, {"Nome",          "NOME",   "C", 200, 0, ""})
+    aAdd(aBrowse, {"Fonte",         "FONTE",  "C", 200, 0, ""})
+    aAdd(aBrowse, {"Descricao",     "DESCRI", "C", 200, 0, ""})
+    aAdd(aBrowse, {"Parametros",    "PARAMS", "M", 1, 0, ""})
+    aAdd(aBrowse, {"Propriedades",  "PROPR",  "M", 1, 0, ""})
+    aAdd(aBrowse, {"Pergunta",      "PERG",   "C", 15, 0, ""})
+
+    aPesquisa := {}
+    aAdd(aPesquisa, {"Objeto Negocio", {{"", "C", 200, 0, "Objeto Negocio", "@!", "OBJNEG"}} } )
+    aAdd(aPesquisa, {"Modulo",         {{"", "C", 20, 0, "Modulo", "@!", "MODULO"}} } )
+    aAdd(aPesquisa, {"Pergunta",       {{"", "C", 15, 0, "Pergunta", "@!", "PERG"}} } )
+
+    oBrowse := FWMBrowse():New()
+    oBrowse:SetAlias(cAliasON)
+    oBrowse:SetDescription("Lista de Objetos de Negócios")
+    oBrowse:SetTemporary(.T.)
+    oBrowse:SetFields(aBrowse)
+    oBrowse:SetSeek(.T., aPesquisa)
+    
+Return oBrowse
+
+User Function MenuDef() as array
+    Local aRotina := {} as array
+    
+    Add Option aRotina Title "Parametros" Action "CUSTOM.SMARTVIEW.U_PARAMER(2)" Operation MODEL_OPERATION_INSERT Access 0
+    Add Option aRotina Title "Exportar Schema" Action "CUSTOM.SMARTVIEW.U_EXSCHEMA" Operation MODEL_OPERATION_UPDATE Access 0
+    Add Option aRotina Title "Criar Requisicao (PostMan)" Action "CUSTOM.SMARTVIEW.U_REQPOSTAN" Operation MODEL_OPERATION_UPDATE Access 0
+    Add Option aRotina Title "Executar Objeto de Negocio (Rest)" Action "CUSTOM.SMARTVIEW.U_EXEOBJNG" Operation MODEL_OPERATION_UPDATE Access 0
+ 
+Return aRotina
+
+User Function ModelDef() as object
+    // Cria a estrutura a ser usada no Modelo de Dados   
+    Local oModel
+    Local bPost     := {|| .T. }
+    Local bCommit   := {|| .T. }  
+    Local bCancel   := {|| .T. }  
+    Local bLoad := {|oFieldModel, lCopy| loadField(oFieldModel, lCopy)}
+    Local oStTMP := FWFormModelStruct():New()
+
+    oStTMP:AddTable(cAliasON, {"OBJNEG", "DESCRI", "DADOS", "PERG", "PROPR", "PARAMS", "MODULO"}, "Temporaria")
+    CreateModelStruct(@oStTMP)
+
+    // Cria o objeto do Modelo de Dados
+    oModel := FWFormModel():New('OBJNEGMODEL', /*bPreValidacao*/ , bPost, bCommit, bCancel )
+
+    // Adiciona ao modelo uma estrutura de formulário de edição por campo
+    oModel:AddFields( 'OBJNEGMASTER', /*cOwner*/, oStTMP, , , bLoad)
+
+    // Adiciona a descricao do Modelo de Dados
+    oModel:SetDescription("Objetos de Negócios")
+
+    // Adiciona a descricao do Componente do Modelo de Dados
+    oModel:GetModel( 'OBJNEGMASTER' ):SetDescription("Objetos de Negócios")
+
+    oModel:SetPrimaryKey({"OBJNEG"})
+
+    oModel:Activate(.T.)
+    
+Return oModel
+
+Static Function loadField(oFieldModel, lCopy)
+    Local aLoad := {}
+  
+   aAdd(aLoad, {(cAliasON)->OBJNEG, (cAliasON)->DESCRI, (cAliasON)->DADOS, (cAliasON)->PERG, (cAliasON)->PROPR, (cAliasON)->PARAMS, (cAliasON)->MODULO}) //dados
+   aAdd(aLoad, 1)
+      
+Return aLoad
+
+//-------------------------------------------------------------------
+User function ViewDef()
+    Local oModel   := FWLoadModel("custom.smartview.GETOBJN")
+    Local oView
+    Local oStTMP
+
+    oStTMP := FWFormViewStruct():New()
+    CreateViewStruct(@oStTMP)
+
+    // Cria o objeto de View
+    oView := FWFormView():New()
+
+    // Define qual o Modelo de dados será utilizado
+    oView:SetModel( oModel )
+
+    //Adiciona no nosso View um controle do tipo FormFields(antiga enchoice)
+    oView:AddField( 'VIEW_OBJNEG', oStTMP, 'OBJNEGMASTER' )
+
+    // Criar um "box" horizontal para receber algum elemento da view
+    oView:CreateHorizontalBox( 'TELA' , 100 )
+
+    // Relaciona o ID da View com o "box" para exibicao
+    oView:SetOwnerView( 'VIEW_OBJNEG', 'TELA' )
+
+Return oView
+ 
+Static Function CreateModelStruct(oStTMP)
+   oStTMP:AddField(;
+        "Obj. Negocio", ; 	                         // [01] C Titulo do campo
+        "Obj. Negocio" , ; 	                         // [02] C ToolTip do campo
+        "OBJNEG" , ;                               // [03] C identificador (ID) do Field
+        "C" , ;                                // [04] C Tipo do campo
+        200, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+
+    oStTMP:AddField(;
+        "Descricao", ; 	                         // [01] C Titulo do campo
+        "Descricao" , ; 	                         // [02] C ToolTip do campo
+        "DESCRI" , ;                               // [03] C identificador (ID) do Field
+        "C" , ;                                // [04] C Tipo do campo
+        200, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+
+    oStTMP:AddField(;
+        "Schema", ; 	                         // [01] C Titulo do campo
+        "Schema" , ; 	                         // [02] C ToolTip do campo
+        "DADOS" , ;                               // [03] C identificador (ID) do Field
+        "M" , ;                                // [04] C Tipo do campo
+        1, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+
+    oStTMP:AddField(;
+        "Pergunta", ; 	                         // [01] C Titulo do campo
+        "Pergunta" , ; 	                         // [02] C ToolTip do campo
+        "PERG" , ;                               // [03] C identificador (ID) do Field
+        "C" , ;                                // [04] C Tipo do campo
+        15, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+
+    oStTMP:AddField(;
+        "Propriedades", ; 	                         // [01] C Titulo do campo
+        "Propriedades" , ; 	                         // [02] C ToolTip do campo
+        "PROPR" , ;                               // [03] C identificador (ID) do Field
+        "M" , ;                                // [04] C Tipo do campo
+        1, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+    oStTMP:AddField(;
+        "Parametros", ; 	                         // [01] C Titulo do campo
+        "Parametros" , ; 	                         // [02] C ToolTip do campo
+        "PARAMS" , ;                               // [03] C identificador (ID) do Field
+        "M" , ;                                // [04] C Tipo do campo
+        1, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+    oStTMP:AddField(;
+        "Modulo", ; 	                         // [01] C Titulo do campo
+        "Modulo" , ; 	                         // [02] C ToolTip do campo
+        "MODULO" , ;                               // [03] C identificador (ID) do Field
+        "C" , ;                                // [04] C Tipo do campo
+        20, ;                              // [05] N Tamanho do campo
+        0 , ;                             // [06] N Decimal do campo
+        nil, ;                             // [07] B Code-block de validaÃ§Ã£o do campo
+        nil, ;                             // [08] B Code-block de validaÃ§Ã£o When do campo
+        nil, ;                                  // [09] A Lista de valores permitido do campo
+        .T., ;                               // [10] L Indica se o campo tem preenchimento obrigatÃ³rio
+        nil , ;  		                     // [11] B Code-block de inicializacao do campo
+        nil, ;                                   // [12] L Indica se trata de um campo chave
+        .T. , ;                                  // [13] L Indica se o campo pode receber valor em uma operaÃ§Ã£o de update.
+        .F.;                               // [14] L Indica se o campo Ã© virtual      
+    )
+Return
+
+Static Function CreateViewStruct(oStTMP)
+    oStTMP:AddField(;
+        "OBJNEG"	     ,;	// [01]  C   Nome do Campo
+        "01"		 ,;	// [02]  C   Ordem
+        "Objeto Negocio"	     ,;	// [03]  C   Titulo do campo
+        "Objeto Negocio"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "C"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    )  
+
+    oStTMP:AddField(;
+        "DESCRI"	     ,;	// [01]  C   Nome do Campo
+        "02"		 ,;	// [02]  C   Ordem
+        "Descricao"	     ,;	// [03]  C   Titulo do campo
+        "Descricao"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "C"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    )  
+
+    oStTMP:AddField(;
+        "DADOS"	     ,;	// [01]  C   Nome do Campo
+        "03"		 ,;	// [02]  C   Ordem
+        "Schema"	     ,;	// [03]  C   Titulo do campo
+        "Schema"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "M"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    ) 
+    oStTMP:AddField(;
+        "PERG"	     ,;	// [01]  C   Nome do Campo
+        "04"		 ,;	// [02]  C   Ordem
+        "Pergunta"	     ,;	// [03]  C   Titulo do campo
+        "Pergunta"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "C"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    ) 
+    oStTMP:AddField(;
+        "PROPR"	     ,;	// [01]  C   Nome do Campo
+        "05"		 ,;	// [02]  C   Ordem
+        "Propriedades"	     ,;	// [03]  C   Titulo do campo
+        "Propriedades"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "M"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    )  
+    oStTMP:AddField(;
+        "PARAMS"	     ,;	// [01]  C   Nome do Campo
+        "06"		 ,;	// [02]  C   Ordem
+        "Parametros"	     ,;	// [03]  C   Titulo do campo
+        "Parametros"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "M"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    ) 
+    oStTMP:AddField(;
+        "MODULO"	     ,;	// [01]  C   Nome do Campo
+        "07"		 ,;	// [02]  C   Ordem
+        "Modulo"	     ,;	// [03]  C   Titulo do campo
+        "Modulo"	 ,;	// [04]  C   Descricao do campo
+        nil			 ,;	// [05]  A   Array com Help
+        "C"		 ,;	// [06]  C   Tipo do campo
+        "@!"     ,;	// [07]  C   Picture
+        nil			 ,;	// [08]  B   Bloco de Picture Var
+        nil          ,;	// [09]  C   Consulta F3
+        nil	 ,;	// [10]  L   Indica se o campo Ã© alteravel
+        NIL			 ,;	// [11]  C   Pasta do campo
+        NIL			 ,;	// [12]  C   Agrupamento do campo
+        nil	     ,;	// [13]  A   Lista de valores permitido do campo (Combo)
+        NIL			 ,;	// [14]  N   Tamanho maximo da maior opÃ§Ã£o do combo
+        nil   ,;	// [15]  C   Inicializador de Browse
+        nil	 ,;	// [16]  L   Indica se o campo Ã© virtual
+        NIL			 ,;	// [17]  C   Picture Variavel
+        NIL          ,;  // [18]  L   Se verdadeiro, indica pulo de linha apÃ³s o campo
+        NIL          ;   // [19]  N   Largura fixa da apresentaÃ§Ã£o do campo   
+    )
+Return
+
+User Function EXSCHEMA()
+    Local oModel    := FWLoadModel("custom.smartview.GETOBJN")
+    Local oModelON  := oModel:GetModel("OBJNEGMASTER") 
+    Local cSchema  := Alltrim(oModelON:GetValue("DADOS"))
+
+    SalvaArquivo(cSchema)
+
+Return
+
+Static Function SalvaArquivo(cConteudo)
+    Local oFWriter
+
+	cArquivo := Alltrim(cGetFile("Arquivo TXT|*.txt|",;
+                         "Exportar Schema",;
+                         0,;
+                         "C:\",;
+                         .T.,;                                
+                         GETF_LOCALHARD  + GETF_NETWORKDRIVE,;
+                         .T.))
+    If File(cArquivo)
+        if MsgYesNo(OemToAnsi("Deseja substituir o arquivo '" + cArquivo + "'?"),OemToAnsi("Aten‡ao")) 
+            FErase(cArquivo)
+        else
+            Return
+        endif
+    EndIf
+    oFWriter := FWFileWriter():New(cArquivo, .T.)
+    oFWriter:Create()
+    oFWriter:Write(cConteudo)     
+    oFWriter:Close() 
+Return
+
+User Function REQPOSTAN()    
+    Local oModel         := FWLoadModel("custom.smartview.GETOBJN")
+    Local oModelON       := oModel:GetModel("OBJNEGMASTER") 
+    Local cObjetoNegocio := Alltrim(oModelON:GetValue("OBJNEG"))
+    Local cRequest  := ""
+    Local jRequest  := JsonObject():New()
+    Local aBody     := {}
+
+    if ! DadosRest()
+        Return
+    endif
+
+    aBody := retBody()     
+    if !aBody[1]
+        Return
+    endif
+
+    jRequest:FromJson(aBody[2])
+
+    cRequest := "curl --location '" + aDadosRotina[2] + "/api/framework/treports/integratedprovider/v1/getdata/" + cObjetoNegocio + "' \"
+    cRequest += "--header 'Content-Type: application/json' \"
+    cRequest += "--header 'Authorization: Basic " + Encode64(aDadosRotina[3] + ":" + aDadosRotina[4]) + "' \"
+    cRequest += "--header 'User-Agent: Protheus " + GetBuild() + "' \"
+    cRequest += "--data '"
+    cRequest += jRequest:ToJSon()
+    cRequest += "'"    
+
+    SalvaArquivo(cRequest)
+
+Return
+
+User Function EXEOBJNG()
+    Local oModel         := FWLoadModel("custom.smartview.GETOBJN")
+    Local oModelON       := oModel:GetModel("OBJNEGMASTER") 
+    Local cObjetoNegocio := Alltrim(oModelON:GetValue("OBJNEG"))
+    Local oRest         := nil
+    Local cRestURL      := ""
+    Local cRestPath     := ""
+    Local aBody         := {}
+    Local aHeader       := {}
+    Local oResult       := JsonObject():New()
+
+    if ! DadosRest()
+        Return
+    endif
+
+    aBody := retBody()
+
+    if ! aBody[1]
+        Return
+    endif
+
+    cRestPath  := "/api/framework/treports/integratedprovider/v1/getdata/" + cObjetoNegocio
+    cRestURL    := aDadosRotina[2]
+
+    // Monta o header da requisição
+    aHeader := {}
+    AAdd(aHeader, "Content-Type: application/json; charset=UTF-8")
+    AAdd(aHeader, "Accept: application/json")
+    AAdd(aHeader, "Authorization: Basic " + Encode64(aDadosRotina[3] + ":" + aDadosRotina[4]))
+    AAdd(aHeader, "User-Agent: Protheus " + GetBuild() )
+
+    oRest := FwRest():New(cRestURL)
+    oRest:SetPath(cRestPath)
+    oRest:SetPostParams(aBody[2])
+    oRest:Post(aHeader)
+    oResult:FromJson(oRest:GetResult())
+    
+    SalvaArquivo(oResult:ToJson())
+Return
+
+Static Function retBody()
+    Local aRet := {.F., ""}
+    Local oModel    := FWLoadModel("custom.smartview.GETOBJN")
+    Local oModelON  := oModel:GetModel("OBJNEGMASTER") 
+    Local jDados    := JsonObject():New()     
+    Local jParametros := JsonObject():New()
+    Local jPropriedades := JsonObject():New()
+    Local cDados        := Alltrim(oModelON:GetValue("DADOS"))
+    Local cPergunte     := Alltrim(oModelON:GetValue("PERG"))
+    Local cPropriedades := Alltrim(oModelON:GetValue("PROPR"))
+    Local cParametros   := Alltrim(oModelON:GetValue("PARAMS"))    
+    Local jRequest  := JsonObject():New()
+    Local aPropriedades := {}
+    Local cError := ""
+    Local nI
+    Local cMVParametro := ""
+    Local xVldParametro
+    Local oPergunte
+    Local aPergunte := {}
+
+    cError  := jDados:FromJson(cDados) 
+    if ! Empty(cError)
+        FWAlertError("Houve um erro na conversão do texto para objeto: " + cError, "Falha no 'parse' do JSON")
+        Return aRet
+    Endif
+
+    cError  := jPropriedades:FromJson(cPropriedades) 
+    if ! Empty(cError)
+        FWAlertError("Houve um erro na conversão do texto para objeto: " + cError, "Falha no 'parse' do JSON")
+        Return aRet
+    Endif
+
+    cError  := jParametros:FromJson(cParametros) 
+    if ! Empty(cError)
+        FWAlertError("Houve um erro na conversão do texto para objeto: " + cError, "Falha no 'parse' do JSON")
+        Return aRet
+    Endif
+        
+    if !Empty(cPergunte)
+        If ! Pergunte(Alltrim(cPergunte))            
+            MsgAlert("Voce deve informar os parametros para executar o objeto de negócio.", "Parâmetros")  
+            Return aRet
+        endif
+    else      
+        MsgAlert("O Objeto de Negocio nao possui grupo de Perguntas. " + CRLF + ;
+                  "Todos os parametros do Objeto de Negocio serão exportados sem Dados", "Parâmetros")  
+    endif
+
+    // Campos 
+    jRequest["properties"] := JsonObject():New()
+    aPropriedades := {}
+    for nI := 1 to Len(jPropriedades)
+        
+        Aadd( aPropriedades, JsonObject():New())
+        aPropriedades[nI] := jPropriedades[nI]:GetJsonObject("CNAME")
+    next nI
+
+    jRequest["properties"] := aPropriedades
+    
+    //Parametros
+    jRequest["parameters"] := JsonObject():New()
+    cParametros := ""
+    if Empty(cPergunte) 
+        for nI := 1 to Len(jParametros)
+            if jParametros[nI]:CTYPE == "string"
+                xVldParametro := Chr(34) + Chr(34)
+            elseif jParametros[nI]:CTYPE == "date"
+                xVldParametro := Chr(34) + DTOS(Date()) + Chr(34)
+            elseif jParametros[nI]:CTYPE == "number"
+                xVldParametro := "0"
+            endif
+            cParametros += Chr(34) + jParametros[nI]:GetJsonObject("CNAME") + Chr(34) + ": " +;
+                                "[" +;
+                                    xVldParametro + ;
+                                "]"
+            cParametros += iif(nI <> Len(jParametros),",","")
+        next nI
+    else
+        oPergunte := FWSX1Util():New()
+        oPergunte:AddGroup(cPergunte) 
+        oPergunte:SearchGroup()
+        aPergunte := oPergunte:GetGroup(cPergunte)
+        aPergunte := aPergunte[2]
+        for nI := 1 to Len(aPergunte)
+            
+            cMVParametro := "MV_PAR" + StrZero(nI,2)
+            xVldParametro := ""            
+            if aPergunte[nI,"CX1_TIPO"] == "C"
+                if Empty(&(cMVParametro)) .or. &(cMVParametro) == nil
+                    xVldParametro := Chr(34) + Chr(34)
+                Else
+                    xVldParametro := Chr(34) + Alltrim(&(cMVParametro)) + Chr(34)  
+                Endif
+            elseif aPergunte[nI,"CX1_TIPO"]== "N"
+                xVldParametro := Alltrim(Str(&(cMVParametro)))
+            elseif aPergunte[nI,"CX1_TIPO"] == "D"
+                xVldParametro := Chr(34) + DTOS(&(cMVParametro)) + Chr(34)
+            endif
+            
+            cParametros += Chr(34) + cMVParametro + Chr(34) + ": " +;
+                                "[" +;
+                                    xVldParametro + ;
+                                "]"
+            cParametros += iif(nI <> Len(aPergunte),",","")
+
+        next nI
+    endif
+
+    jRequest["parameters"]:FromJson("{" + cParametros + "}")
+
+    aRet := {.T., jRequest:ToJSon()}
+
+Return aRet
+
+User Function PARAMER(lChamada)
+    Default lChamada := 1
+
+    Local aRet   := {.T., "http://localhost:8080/rest", "admin", "", "totvs*"}
+    Local aPergs := {}
+    Local cUrlRest      := Space(100)
+    Local cUsuario      := Space(20)
+    Local cSenhaUser    := Space(20)
+    Local cFiltroON     := Space(150)
+
+    aAdd(aPergs, {1, "Url Rest:",           cUrlRest, "",            ".T.",        "",    ".T.", 100, .T.})
+    aAdd(aPergs, {1, "Usuario Aut. Rest",   cUsuario, "",            ".T.",        "",    ".T.", 20,  .T.})
+    aAdd(aPergs, {1, "Senha Aut. Rest",     cSenhaUser,   "",            ".T.",        "",    ".T.", 20,  .T.})
+    aAdd(aPergs, {1, "Filtro dos Objetos de Negócio",     cFiltroON,   "",            ".T.",        "",    ".T.", 150,  .T.})
+
+    If ParamBox(aPergs, "Informe os parâmetros", , {|| fValidOk()} )    
+        aRet := {.T., Alltrim(MV_PAR01), Alltrim(MV_PAR02), Alltrim(MV_PAR03), Alltrim(MV_PAR04)}        
+        if lChamada == 2 
+            aDadosRotina := aRet
+            buscaObjetoNegocios()
+        endif
+    EndIf
+
+Return aRet
+
+Static Function fValidOk()
+    Local lRet := .T.
+    Local cFiltro := Alltrim(MV_PAR04)
+    
+    if Substr(cFiltro,1,1) == "*"
+        MsgAlert("O parametro 'Filtro dos Objetos de Negócio' nao ter asterisco no inicio do parametro.", "Parâmetros")  
+        lRet := .F.
+    endif
+
+Return lRet
+
+Static Function DadosRest()
+    Local lRet := .T.
+    
+    if !aDadosRotina[1]
+        MsgAlert("Informe antes os parametros do servidor Rest.", "Parâmetros")  
+        aDadosRotina := U_PARAMER(2)
+        lRet := aDadosRotina[1]
+    endif
+
+Return lRet
